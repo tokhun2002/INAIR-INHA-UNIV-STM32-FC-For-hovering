@@ -117,7 +117,7 @@ bldc 모터 출력 오차 관련해서는
 
 현재 코드의 제어기 테스트를 하고싶다면 
 기존 RC_init(), RC_GetData()를 없애버리고 
-main에 있는 RC 스로틀 1500 가상 주입함수를 main의 while 루프에다 넣으면된다.
+main.c에 있는 RC 스로틀 1500 가상 주입함수를 main의 while 루프에다 넣으면된다.
 그후 live expression 에서 서보 채널 출력을 확인하면 된다. 
 
 ### 정리
