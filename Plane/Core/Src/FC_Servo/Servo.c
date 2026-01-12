@@ -1,11 +1,11 @@
 /*
  * Servo.c
  *
- *  Created on: Mar 27, 2025
- *      Author: leecurrent04
- *      Email : leecurrent04@inha.edu
- *  Modified by: DongHunLee
- *  Modified on: Jan 2, 2026
+ * Created on: Mar 27, 2025
+ * Author: leecurrent04
+ * Email : leecurrent04@inha.edu
+ * Modified by: DongHunLee
+ * Modified on: Jan 10, 2026 (Added Takeoff Latch / Air-Mode Logic)
  */
 
 /* Includes ------------------------------------------------------------------*/
@@ -37,8 +37,8 @@ const uint8_t SERVO_TIMER_MAP[SERVO_CHANNEL_MAX] = {
 
 /* -------------------------------------------------------------------------- */
 /* Level(Angle) outer-loop configuration                                      */
-/*  - SERVO_LEVEL_ENABLE=1: 스틱은 각도(roll/pitch), 내부는 rate PID로 구동      */
-/*  - 스로틀만 올릴 때 '수평 유지'를 원하면 이 모드가 필요함                     */
+/* - SERVO_LEVEL_ENABLE=1: 스틱은 각도(roll/pitch), 내부는 rate PID로 구동      */
+/* - 스로틀만 올릴 때 '수평 유지'를 원하면 이 모드가 필요함                     */
 /* -------------------------------------------------------------------------- */
 #define SERVO_LEVEL_ENABLE        (1)
 /* msg.attitude.roll/pitch 단위가 deg면 1, rad면 0 */
@@ -50,23 +50,26 @@ const uint8_t SERVO_TIMER_MAP[SERVO_CHANNEL_MAX] = {
 #define ANGLE_KP_RATE_PER_RAD    (4.0f)
 
 #define STICK_DEADBAND_US     (10)     /* 1500±10us는 0으로 */
-#define THR_LOW_CUTOFF_US     (1050)   /* 스로틀 낮으면 I항 리셋 */
+
+/* [수정됨] 이륙 판정 임계값 */
+#define THR_LANDED_RESET_US   (1050)   /* 이 값 밑으로 내려야 착륙으로 간주 */
+#define THR_TAKEOFF_TRIGGER_US (1450)  /* 이 값을 넘으면 "비행 중"으로 간주 (1600 이륙 고려하여 약간 낮게 설정) */
 
 /* PID 출력(=모터 믹서에 더해지는 보정량)의 제한(us) */
 #define AXIS_OUT_LIMIT_US     (300.0f) /* 기존 코드의 0.6*500=300과 스케일 호환 */
 #define I_LIMIT_US            (150.0f)
 
 /* D-term LPF */
-#define D_CUTOFF_HZ           (60.0f)
+#define D_CUTOFF_HZ           (20.0f)
 
 /* 초기 PID 게인(반드시 튜닝 필요: 프레임/프로펠러/필터에 따라 달라짐) */
 #define KP_ROLL_US_PER_RAD_S   (45.0f)
 #define KI_ROLL_US_PER_RAD_S   (10.0f)
-#define KD_ROLL_US_PER_RAD_S   (1.2f)
+#define KD_ROLL_US_PER_RAD_S   (0.6f)
 
 #define KP_PITCH_US_PER_RAD_S  (45.0f)
 #define KI_PITCH_US_PER_RAD_S  (10.0f)
-#define KD_PITCH_US_PER_RAD_S  (1.2f)
+#define KD_PITCH_US_PER_RAD_S  (0.3f)
 
 #define KP_YAW_US_PER_RAD_S    (60.0f)
 #define KI_YAW_US_PER_RAD_S    (10.0f)
@@ -89,6 +92,8 @@ static pid_t pid_roll, pid_pitch, pid_yaw;
 static uint8_t s_armed = 0;
 static uint32_t s_last_ms = 0;
 
+/* [추가됨] 비행 상태 래치 변수 (0: 땅, 1: 공중) */
+static uint8_t s_is_airborne = 0;
 
 /* Level 모드에서 '현재 자세를 수평 기준'으로 잡기 위한 trim */
 static float s_roll_trim = 0.0f;
@@ -136,16 +141,20 @@ static void pid_reset(pid_t *pid)
 static float pid_update_rate(pid_t *pid, float sp_rad_s, float meas_rad_s, float dt_s)
 {
     /* error = setpoint - measurement */
+	// 오차계산
     float err = sp_rad_s - meas_rad_s;
 
     /* P */
+    //오차만큼(비례항)
     float p = pid->kp * err;
 
     /* I (clamp) */
+    //적분항(오차누적)
     pid->i_term += pid->ki * err * dt_s;
     pid->i_term = clampf(pid->i_term, -pid->i_limit, pid->i_limit);
 
     /* D on measurement: -kd * d(meas)/dt */
+    //미분항 진동잡아줌.
     float d_meas = (meas_rad_s - pid->prev_meas) / dt_s;
     pid->prev_meas = meas_rad_s;
 
@@ -191,6 +200,7 @@ int SERVO_Initialization(void)
     rate_controller_reset_all();
 
     s_last_ms = msg.system_time.time_boot_ms;
+    s_is_airborne = 0; // 초기화 시 땅으로 간주
 
     SERVO_doDisarm();
     return 0;
@@ -216,6 +226,7 @@ void SERVO_doArm(void)
     s_armed = 1;
     s_trim_valid = 0;
     s_last_ms = msg.system_time.time_boot_ms;
+    s_is_airborne = 0; // Arming 직후엔 당연히 땅
     rate_controller_reset_all();
     return;
 }
@@ -237,6 +248,7 @@ void SERVO_doDisarm(void)
 
     s_armed = 0;
     s_trim_valid = 0;
+    s_is_airborne = 0; // Disarm 되면 땅
     rate_controller_reset_all();
     return;
 }
@@ -267,39 +279,13 @@ void SERVO_setFailsafe(void)
     return;
 }
 
-/*
- * @brief ESC Calibration
- * @parm uint8_t mode
- *              0 : high 신호 입력
- *              1 : low 신호 입력
- * @retval none
- */
-//void SERVO_doCalibrate(uint8_t mode)
-//{
-//    uint8_t channels[] = {1,2,3,4};
-//    if(mode)
-//    {
-//        configurePWM(50);
-//
-//        doArm2Channels(&channels[0], sizeof(channels), 1);
-//        setPWM2Channels(&channels[0], sizeof(channels), 2000);
-//    }
-//    else
-//    {
-//        setPWM2Channels(&channels[0], sizeof(channels), 1000);
-//        HAL_Delay(1000);
-//        doArm2Channels(&channels[0], sizeof(channels), 0);
-//    }
-//    return;
-//}
-
 /* Functions -----------------------------------------------------------------*/
 /*
  * @brief 특정 채널 출력 모드 설정
  * @parm uint8_t servoCh (in 1-12)
  * @parm uint8_t state
- *                  0 : disable
- *                  1 : enable
+ * 0 : disable
+ * 1 : enable
  * @retval 0 : 설정됨
  * @retval -1 : ch 범위 오류
  */
@@ -441,22 +427,53 @@ void calculateServoOutput(void)
         msg.servo_output_raw.servo_raw[1] = 1000;
         msg.servo_output_raw.servo_raw[2] = 1000;
         msg.servo_output_raw.servo_raw[3] = 1000;
+        s_is_airborne = 0; // Arm 안됐으면 땅
         return;
     }
 
-    /* 스로틀 낮을 때 I항 축적 방지 */
-    if (thr_us <= THR_LOW_CUTOFF_US)
+    // -------------------------------------------------------------
+    // [중요 수정] 이륙 판정 래치(Takeoff Latch) 및 I항 제어 로직
+    // -------------------------------------------------------------
+
+    // 1. 이륙 상태 판정 (스로틀이 1450us를 한 번이라도 넘으면 공중으로 간주)
+    if (thr_us > THR_TAKEOFF_TRIGGER_US)
     {
-        rate_controller_reset_all();
+        s_is_airborne = 1;
     }
+
+    // 2. 착륙/초기화 판정 (스로틀을 바닥(1050us)까지 내려야 땅으로 간주)
+    if (thr_us < THR_LANDED_RESET_US)
+    {
+        s_is_airborne = 0;
+        rate_controller_reset_all(); // I항, D항 등 모든 PID 상태 초기화
+    }
+    // 3. 땅에 있지만 스로틀을 올리는 중 (1050 < Throttle < 1450)
+    else if (s_is_airborne == 0)
+    {
+        // 아직 뜨지 않았으므로 I항(적분)이 쌓이면 안 됨 (Wind-up 방지)
+        // 하지만 P항(기울기 제어)과 D항(진동 제어)은 작동해서 균형을 잡도록 함
+        pid_roll.i_term = 0.0f;
+        pid_pitch.i_term = 0.0f;
+        pid_yaw.i_term = 0.0f;
+    }
+    // s_is_airborne == 1 이면? 아무 조치 안 함 -> I항 정상 작동 (이게 핵심)
+    // -------------------------------------------------------------
+
 
     /* 스틱 입력(1500 기준) */
     float rol_cmd = apply_deadband_us((int16_t)rol_us - 1500, STICK_DEADBAND_US);
     float pit_cmd = apply_deadband_us((int16_t)pit_us - 1500, STICK_DEADBAND_US);
     float yaw_cmd = apply_deadband_us((int16_t)yaw_us - 1500, STICK_DEADBAND_US);
 
-#if SERVO_LEVEL_ENABLE
-    #if SERVO_ATTITUDE_IN_DEG
+    // 만약에 yaw가 1500이면 무조건 yaw i는 끄는거임. 안전성을 위해서.
+    if (fabsf(yaw_cmd) < (float)STICK_DEADBAND_US) {
+            pid_yaw.i_term = 0.0f;      // 강하게: 항상 0
+            // 더 부드럽게 하고 싶으면 아래처럼 감쇠 방식 사용
+            // pid_yaw.i_term *= 0.98f;
+        }
+
+#if SERVO_LEVEL_ENABLE //매크로 사용
+    #if SERVO_ATTITUDE_IN_DEG //먄약 degree값이 오면 라디안으로 바꿔주는것. 근데 라디안값으로 들어와서 상관 없음.
         float roll_meas_rad  = msg.attitude.roll  * DEG2RAD_F;
         float pitch_meas_rad = msg.attitude.pitch * DEG2RAD_F;
     #else
@@ -475,14 +492,16 @@ void calculateServoOutput(void)
 
     float sp_yaw   = (yaw_cmd / 500.0f) * MAX_YAW_RATE_RAD_S;
 
-#else
+#else //제어기 비활성화. 계속해서 수평 유지.
     float sp_roll  = (rol_cmd / 500.0f) * MAX_ROLL_RATE_RAD_S;
     float sp_pitch = (pit_cmd / 500.0f) * MAX_PITCH_RATE_RAD_S;
     float sp_yaw   = (yaw_cmd / 500.0f) * MAX_YAW_RATE_RAD_S;
 #endif
 
+
+// 여기서부터 각속도 pid
     /* 측정 rate */
-    float meas_roll  = (float)msg.scaled_imu.xgyro * 0.001f;
+    float meas_roll  = (float)msg.scaled_imu.xgyro * 0.001f; // x자이로가 mrad라 0.001로 스케일링 해줘야됨.
     float meas_pitch = (float)msg.scaled_imu.ygyro * 0.001f;
     float meas_yaw   = (float)msg.scaled_imu.zgyro * 0.001f;
 
@@ -522,9 +541,6 @@ void calculateServoOutput(void)
     msg.servo_output_raw.servo_raw[1] = Servo_nomalize((uint16_t)clampf(m1, 1000.0f, 2000.0f));
     msg.servo_output_raw.servo_raw[2] = Servo_nomalize((uint16_t)clampf(m2, 1000.0f, 2000.0f));
     msg.servo_output_raw.servo_raw[3] = Servo_nomalize((uint16_t)clampf(m3, 1000.0f, 2000.0f));
-
-    heartservo++;
-    if (heartservo > 1000) heartservo = 0;
     return;
 }
 

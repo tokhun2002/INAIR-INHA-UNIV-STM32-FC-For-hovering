@@ -144,6 +144,15 @@ static inline void TEST_VirtualRC_Throttle50_NeutralRPY(void)
     msg.RC_channels.value[2] = 1500;
     msg.RC_channels.value[3] = 1500;
 }
+// 모터 출력 테스트용
+static inline void Test_RawServo_ForMotorTest(void)
+{
+	msg.servo_output_raw.servo_raw[0] = msg.RC_channels.value[param.rc.map.THR];
+	msg.servo_output_raw.servo_raw[1] =	msg.RC_channels.value[param.rc.map.THR];
+	msg.servo_output_raw.servo_raw[2] = msg.RC_channels.value[param.rc.map.THR];
+	msg.servo_output_raw.servo_raw[3] = msg.RC_channels.value[param.rc.map.THR];
+	setPWM();
+}
 
 /* USER CODE END 0 */
 
@@ -209,6 +218,7 @@ int main(void)
             AHRS_GetData();
             if(FS_IsFailsafe() == 0){ //스로틀값 작으면 그냥 계산 패스 후 0으로 수정. 이거 없으면 스로틀 최대한 내려도 제어기 때문에 모터 돌아감
              SERVO_control();
+             //Test_RawServo_ForMotorTest();
             }
             roll_deg  = msg.attitude.roll  * RAD2DEG_F;
             pitch_deg = msg.attitude.pitch * RAD2DEG_F;
