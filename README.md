@@ -14,7 +14,6 @@ https://github.com/NARAE-INHA-UNIV/STM32-FC
 ---
 
 ## 1. AHRS 변경 사항
-기존의 쿼터니언 기반 자세 추정 알고리즘을 폐기하고, 상보 필터(Complementary Filter) 방식으로 전면 교체하였습니다.
 
 ### 1.1 기존 AHRS_getData() 코드의 문제점 분석 
 기존 `AHRS.c`에 구현되어 있던 쿼터니언 기반 알고리즘은 다음과 같은 이유로 실제 비행에 아직 부적합했습니다.
