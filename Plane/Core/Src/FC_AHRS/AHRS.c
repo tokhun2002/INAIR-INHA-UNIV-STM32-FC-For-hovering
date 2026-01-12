@@ -127,7 +127,7 @@ int AHRS_GetData(void)
     acc.z = imu->zacc * 0.001f * 9.81f;
 
     // 자이로 센서값 → 물리량 변환(m rad/s -> rad/s)
-
+	// 여기에 보정값 적용.
     gyro.x = (imu->xgyro * 0.001f) - gyro_off_x;
 	gyro.y = (imu->ygyro * 0.001f) - gyro_off_y;
 	gyro.z = (imu->zgyro * 0.001f) - gyro_off_z;
