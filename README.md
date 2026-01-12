@@ -9,8 +9,6 @@ https://github.com/NARAE-INHA-UNIV/STM32-FC
 
 ---
 # 업데이트 2026.01.13 - 호버링 안정성 확보를 위한 AHRS 및 제어 로직 수정
-* **주요 변경 사항:** AHRS 알고리즘 교체(Quaternion → Complementary), 이륙 판정 로직(Takeoff Latch) 추가, **Yaw 제어 전략 재수립**
-
 ---
 
 ## 1. AHRS 변경 사항
