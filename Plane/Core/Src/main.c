@@ -33,7 +33,7 @@
 
 #include <FC_Serial/Serial.h>
 #include <FC_Servo/Servo.h>
-
+#include <FC_Servo/Servo_module.h>
 // 디버깅용 deg 계수
 #define RAD2DEG_F (57.29577951308232f)
 
@@ -134,10 +134,6 @@ static inline void TEST_VirtualRC_Throttle50_NeutralRPY(void)
 {
     param.rc.PROTOCOLS = 1;
 
-    param.rc.map.THR = 0;
-    param.rc.map.ROL = 1;
-    param.rc.map.PIT = 2;
-    param.rc.map.YAW = 3;
 
     msg.RC_channels.value[0] = 1500; // thr 50%
     msg.RC_channels.value[1] = 1500;
@@ -207,6 +203,8 @@ int main(void)
 
     LED_SetBlue(1);
     BuzzerPlayOneCycle();
+
+    // doArm은 항상 마지막에
     SERVO_doArm();// 절대 doArm이후에 buzzer쓰면안됨. 그러면 timer4번이 servo pwm에 씌여서 PSC ARR 바뀌면 안됨.
 
 
@@ -214,18 +212,17 @@ int main(void)
     {
 
     	RC_GetData();
-
-            AHRS_GetData();
-            if(FS_IsFailsafe() == 0){ //스로틀값 작으면 그냥 계산 패스 후 0으로 수정. 이거 없으면 스로틀 최대한 내려도 제어기 때문에 모터 돌아감
-             SERVO_control();
-             //Test_RawServo_ForMotorTest();
-            }
-            roll_deg  = msg.attitude.roll  * RAD2DEG_F;
-            pitch_deg = msg.attitude.pitch * RAD2DEG_F;
-            yaw_deg   = msg.attitude.yaw   * RAD2DEG_F; // rpy degree로 확인용
-            LED_Update();
-
-
+		AHRS_GetData();
+		if(FS_IsFailsafe() == 0){ //스로틀값 작으면 그냥 계산 패스 후 0으로 수정. 이거 없으면 스로틀 최대한 내려도 제어기 때문에 모터 돌아감
+			SERVO_control();
+		 //Test_RawServo_ForMotorTest();
+		}
+		roll_deg  = msg.attitude.roll  * RAD2DEG_F;
+		pitch_deg = msg.attitude.pitch * RAD2DEG_F;
+		yaw_deg   = msg.attitude.yaw   * RAD2DEG_F; // rpy degree로 확인용
+		LED_Update();
+		SERIAL_Handler();
+		msg.timing.imu_new_sample = 0; // 매우 중요 imu 값을 읽었다는것. 다음에 또 같은 IMU값 쓰지 않기위함.
     }
 }
 

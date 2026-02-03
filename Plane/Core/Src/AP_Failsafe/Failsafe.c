@@ -8,7 +8,7 @@
 
 
 #include <AP_Failsafe/Failsafe_module.h>
-
+#include <FC_Servo/Servo_module.h>
 
 uint8_t fsFlag = 0;
 

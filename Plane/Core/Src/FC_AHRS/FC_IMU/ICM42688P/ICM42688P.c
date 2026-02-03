@@ -6,10 +6,12 @@
  *      Author: leecurrent04
  *      Email : leecurrent04@inha.edu
  */
+// 2026.01.26 -> 단위변환시 반올림 오류 수정.
 
 
 /* Includes ------------------------------------------------------------------*/
 #include <FC_AHRS/FC_IMU/ICM42688P/ICM42688P_module.h>
+#include <math.h>
 
 
 /* Variables -----------------------------------------------------------------*/
@@ -67,17 +69,44 @@ uint8_t ICM42688P_Initialization(SCALED_IMU* p)
  */
 uint8_t ICM42688P_GetData(void)
 {
-	// Check data is ready
-	if(ICM42688P_dataReady()) return 1;
+    // NOT READY면: 샘플 이벤트 없음
+    if (ICM42688P_dataReady()) {
+        msg.timing.imu_new_sample = 0;
+        return 1;
+    }
 
-	ICM42688P_get6AxisRawData(&msg.raw_imu);
+    //  새 샘플 읽기 (여기서 msg.raw_imu.time_usec 갱신됨)
+    ICM42688P_get6AxisRawData(&msg.raw_imu);
 
-	icm42688p->time_boot_ms = msg.system_time.time_boot_ms;
+    //  IMU 샘플 기반 dt 계산
+    static uint64_t prev_us = 0;
+    uint64_t now_us = msg.raw_imu.time_usec;
 
-	ICM42688P_convertGyroRaw2Dps();
-	ICM42688P_convertAccRaw2G();
+    if (prev_us != 0) {
+        uint64_t diff_us = (now_us >= prev_us) ? (now_us - prev_us) : 0;
 
-	return 0;
+        // 방어: 0us / 너무 큰 dt는 스킵 (디버그 브레이크 등)
+        if (diff_us == 0 || diff_us > 100000ULL) {  // 100ms
+            msg.timing.dt_imu_s = 0.0f;
+            msg.timing.imu_new_sample = 0;
+        } else {
+            msg.timing.dt_imu_s = (float)diff_us * 1e-6f;
+            msg.timing.imu_new_sample = 1;
+        }
+    } else {
+        msg.timing.dt_imu_s = 0.0f;
+        msg.timing.imu_new_sample = 0;
+    }
+
+    prev_us = now_us;
+    msg.timing.imu_time_usec = now_us; // 디버그용
+
+    icm42688p->time_boot_ms = msg.system_time.time_boot_ms;
+
+    ICM42688P_convertGyroRaw2Dps();
+    ICM42688P_convertAccRaw2G();
+
+    return 0;
 }
 
 
@@ -143,9 +172,9 @@ void ICM42688P_convertGyroRaw2Dps(void)
 	float sensitivity = param.ins.imu0.gyro.sensitivity;
 
 	// m degree
-	imu->xgyro = (int16_t)(DEG2RAD(msg.raw_imu.xgyro/sensitivity)*1000 + 0.5f);
-	imu->ygyro = (int16_t)(DEG2RAD(msg.raw_imu.ygyro/sensitivity)*1000 + 0.5f);
-	imu->zgyro = (int16_t)(DEG2RAD(msg.raw_imu.zgyro/sensitivity)*1000 + 0.5f);
+	imu->xgyro = (int16_t)lrintf(DEG2RAD((float)msg.raw_imu.xgyro / sensitivity) * 1000.0f);
+	imu->ygyro = (int16_t)lrintf(DEG2RAD((float)msg.raw_imu.ygyro / sensitivity) * 1000.0f);
+	imu->zgyro = (int16_t)lrintf(DEG2RAD((float)msg.raw_imu.zgyro / sensitivity) * 1000.0f);
 
 	return;
 }
@@ -165,9 +194,9 @@ void ICM42688P_convertAccRaw2G(void)
 	float sensitivity = param.ins.imu0.acc.sensitivity;
 
 	// mG
-	imu->xacc = (int16_t)(msg.raw_imu.xacc/sensitivity * 1000 + 0.5f);
-	imu->yacc = (int16_t)(msg.raw_imu.yacc/sensitivity * 1000 + 0.5f);
-	imu->zacc = (int16_t)(msg.raw_imu.zacc/sensitivity * 1000 + 0.5f);
+	imu->xacc = (int16_t)lrintf(((float)msg.raw_imu.xacc / sensitivity) * 1000.0f);
+	imu->yacc = (int16_t)lrintf(((float)msg.raw_imu.yacc / sensitivity) * 1000.0f);
+	imu->zacc = (int16_t)lrintf(((float)msg.raw_imu.zacc / sensitivity) * 1000.0f);
 
 	return;
 }
@@ -270,8 +299,8 @@ int ICM42688P_dataReady(void)
 	uint8_t temp = 0;
 	temp =ICM42688P_readbyte(INT_STATUS);
 
-	if((temp>>3)&0x01) return 0;
-	return 1;
+	if((temp>>3)&0x01) return 0; //새로운 값 갱신됨.
+	return 1; //준비 안됨
 }
 
 

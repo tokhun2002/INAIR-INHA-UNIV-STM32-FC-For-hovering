@@ -32,9 +32,9 @@ typedef struct __attribute__((packed)){
 	RC_CHANNELS RC_channels;					// 65
 	SCALED_IMU2 scaled_imu2;					// 116
 	SCALED_IMU3 scaled_imu3;					// 129
-
 	// Development
-	AIRSPEED airspeed1;
+	IMU_FILT IMU_filt;
+	CTRL_TIMING timing;
 } Messages;
 
 extern Messages msg;

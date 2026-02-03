@@ -192,6 +192,16 @@ typedef struct __attribute__((packed)){
 } SCALED_IMU3;
 
 
+typedef struct {
+    uint32_t time_boot_ms;
+    float gyro_x;
+    float gyro_y;
+    float gyro_z;
+    float acc_x;
+    float acc_y;
+    float acc_z;
+} IMU_FILT;
+
 /*
  * ACTUATOR_OUTPUT_STATUS (375)
  * The raw values of the actuator outputs (e.g. on Pixhawk, from MAIN, AUX ports).
@@ -203,6 +213,12 @@ typedef struct __attribute__((packed)){
 } ACTUATOR_OUTPUT_STATUS;
  */
 
+
+typedef struct {
+    uint8_t  imu_new_sample;   // 1: 이번 루프에 새 IMU 샘플 있음
+    float    dt_imu_s;          // IMU 샘플 기반 dt (seconds)
+    uint64_t imu_time_usec;     // 이번 샘플의 time_usec (디버그/로깅용)
+} CTRL_TIMING;
 
 
 #endif /* INC_FC_SERIAL_MINILINK_MSG_CMD_COMMON_H_ */

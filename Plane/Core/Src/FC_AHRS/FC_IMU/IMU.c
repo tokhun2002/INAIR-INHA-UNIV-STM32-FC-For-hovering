@@ -81,8 +81,8 @@ unsigned int IMU_getDataRaw(void)
 	// SCALED_IMU
 	retVal = (ICM42688P_GetData() << 0);
 
-	// SCALED_IMU2
-	retVal = (BMI323_GetData() << 4);
+//	// SCALED_IMU2
+//	retVal = (BMI323_GetData() << 4);
 
 
 	// SCALED_IMU3

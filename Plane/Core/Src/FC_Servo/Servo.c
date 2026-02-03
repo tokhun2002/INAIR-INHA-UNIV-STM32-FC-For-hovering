@@ -12,6 +12,9 @@
 #include <FC_Servo/Servo_module.h>
 #include <math.h>
 #include <string.h>
+#include "FC_AHRS/AHRS.h"
+
+
 
 /* Variables -----------------------------------------------------------------*/
 /*
@@ -29,11 +32,12 @@ const uint8_t SERVO_TIMER_MAP[SERVO_CHANNEL_MAX] = {
 /* Rate control configuration (필요시 여기만 튜닝/이식)                         */
 /* -------------------------------------------------------------------------- */
 
+#define TRIM_SAMPLES  1000
 
 /* RC 스틱 -> 목표 각속도(rad/s) */
-#define MAX_ROLL_RATE_RAD_S   (6.0f)   /* 약 343 deg/s */
-#define MAX_PITCH_RATE_RAD_S  (6.0f)
-#define MAX_YAW_RATE_RAD_S    (4.0f)   /* yaw는 보통 roll/pitch보다 낮게 */
+#define MAX_ROLL_RATE_RAD_S   (5.0f)   //이건 얼만큼 각속도가 튀게 할지 정하는거임. 낮게하면 안튀어서 부드럽긴한데,
+#define MAX_PITCH_RATE_RAD_S  (5.0f)	// 이륙할때 충분한힘을 못받을수도있음. 이륙할때는 30도 이상 흔들릴수있음.
+#define MAX_YAW_RATE_RAD_S    (2.0f)   /* yaw는 보통 roll/pitch보다 낮게 */
 
 /* -------------------------------------------------------------------------- */
 /* Level(Angle) outer-loop configuration                                      */
@@ -44,36 +48,42 @@ const uint8_t SERVO_TIMER_MAP[SERVO_CHANNEL_MAX] = {
 /* msg.attitude.roll/pitch 단위가 deg면 1, rad면 0 */
 #define SERVO_ATTITUDE_IN_DEG     (0)
 #define DEG2RAD_F                (0.01745329251994329577f)
-#define MAX_ANGLE_DEG            (35.0f)
+#define MAX_ANGLE_DEG            (15.0f)
 #define MAX_ANGLE_RAD            (MAX_ANGLE_DEG * DEG2RAD_F)
 /* 각도 오차(rad)를 목표 각속도(rad/s)로 바꾸는 P 게인 */
-#define ANGLE_KP_RATE_PER_RAD    (4.0f)
+#define ANGLE_KP_RATE_PER_RAD    (10.0f) //이건 실험을 여러번해본결과 10이딱좋음.
 
 #define STICK_DEADBAND_US     (10)     /* 1500±10us는 0으로 */
 
 /* [수정됨] 이륙 판정 임계값 */
 #define THR_LANDED_RESET_US   (1050)   /* 이 값 밑으로 내려야 착륙으로 간주 */
-#define THR_TAKEOFF_TRIGGER_US (1450)  /* 이 값을 넘으면 "비행 중"으로 간주 (1600 이륙 고려하여 약간 낮게 설정) */
+#define THR_TAKEOFF_TRIGGER_US (1350)  /* 이 값을 넘으면 "비행 중"으로 간주 (1600 이륙 고려하여 약간 낮게 설정) */
 
 /* PID 출력(=모터 믹서에 더해지는 보정량)의 제한(us) */
-#define AXIS_OUT_LIMIT_US     (300.0f) /* 기존 코드의 0.6*500=300과 스케일 호환 */
+#define AXIS_OUT_LIMIT_US     (350.0f) /* 기존 코드의 0.6*500=300과 스케일 호환 */
 #define I_LIMIT_US            (150.0f)
 
 /* D-term LPF */
-#define D_CUTOFF_HZ           (20.0f)
+#define D_CUTOFF_HZ           (30.0f)
 
 /* 초기 PID 게인(반드시 튜닝 필요: 프레임/프로펠러/필터에 따라 달라짐) */
-#define KP_ROLL_US_PER_RAD_S   (45.0f)
-#define KI_ROLL_US_PER_RAD_S   (10.0f)
-#define KD_ROLL_US_PER_RAD_S   (0.6f)
 
-#define KP_PITCH_US_PER_RAD_S  (45.0f)
-#define KI_PITCH_US_PER_RAD_S  (10.0f)
-#define KD_PITCH_US_PER_RAD_S  (0.3f)
+// D는 절대로 0.2 이상 올리면안됨. 0.1도 충분히 강함.
+#define KP_ROLL_US_PER_RAD_S   (30.0f)
+#define KI_ROLL_US_PER_RAD_S   (0.0f)
+#define KD_ROLL_US_PER_RAD_S   (0.1f)
 
-#define KP_YAW_US_PER_RAD_S    (60.0f)
-#define KI_YAW_US_PER_RAD_S    (10.0f)
-#define KD_YAW_US_PER_RAD_S    (0.5f)
+#define KP_PITCH_US_PER_RAD_S  (30.0f)
+#define KI_PITCH_US_PER_RAD_S  (0.0f)
+#define KD_PITCH_US_PER_RAD_S  (0.1f)
+
+#define KP_YAW_US_PER_RAD_S    (30.0f)
+#define KI_YAW_US_PER_RAD_S    (0.0f)
+#define KD_YAW_US_PER_RAD_S    (0.1f)
+
+/* ms 기반 s_last_ms 대신 us 기반으로 */
+static uint16_t s_last_cnt_us = 0;
+
 
 typedef struct {
     float kp, ki, kd;
@@ -90,7 +100,6 @@ typedef struct {
 
 static pid_t pid_roll, pid_pitch, pid_yaw;
 static uint8_t s_armed = 0;
-static uint32_t s_last_ms = 0;
 
 /* [추가됨] 비행 상태 래치 변수 (0: 땅, 1: 공중) */
 static uint8_t s_is_airborne = 0;
@@ -199,7 +208,7 @@ int SERVO_Initialization(void)
     pid_init(&pid_yaw,   KP_YAW_US_PER_RAD_S,   KI_YAW_US_PER_RAD_S,   KD_YAW_US_PER_RAD_S,   I_LIMIT_US, AXIS_OUT_LIMIT_US);
     rate_controller_reset_all();
 
-    s_last_ms = msg.system_time.time_boot_ms;
+    s_last_cnt_us = (uint16_t)LL_TIM_GetCounter(TIM14);
     s_is_airborne = 0; // 초기화 시 땅으로 간주
 
     SERVO_doDisarm();
@@ -211,24 +220,33 @@ int SERVO_Initialization(void)
  * @parm none
  * @retval none
  */
+
 void SERVO_doArm(void)
 {
     configurePWM(param.servo.RATE);
 
-    for(uint8_t i=0; i<SERVO_CHANNEL_MAX; i++)
-    {
-        if(!((param.servo.GPIO_MASK >> i)&0x1)){
-            continue;
-        }
+    for (uint8_t i=0; i<SERVO_CHANNEL_MAX; i++) {
+        if(!((param.servo.GPIO_MASK >> i)&0x1)) continue;
         doArm2Channel(i+1, 1);
     }
 
     s_armed = 1;
-    s_trim_valid = 0;
-    s_last_ms = msg.system_time.time_boot_ms;
-    s_is_airborne = 0; // Arming 직후엔 당연히 땅
+
+    // --- trim average ---
+    float sum_r = 0.0f, sum_p = 0.0f;
+    for (int k=0; k<TRIM_SAMPLES; k++) {
+        AHRS_GetData();                 // ★ 여기서 attitude를 갱신시킨다
+        sum_r += msg.attitude.roll;
+        sum_p += msg.attitude.pitch;
+        LL_mDelay(1);                   // 1ms면 1000샘플=1초라 좀 김. 0.2~0.3초로 줄이려면 샘플 수를 줄여.
+    }
+    s_roll_trim  = sum_r / TRIM_SAMPLES;
+    s_pitch_trim = sum_p / TRIM_SAMPLES;
+    s_trim_valid = 1;
+
+    s_last_cnt_us = (uint16_t)LL_TIM_GetCounter(TIM14);
+    s_is_airborne = 0;
     rate_controller_reset_all();
-    return;
 }
 
 /*
@@ -261,6 +279,10 @@ void SERVO_doDisarm(void)
  */
 void SERVO_control(void)
 {
+	// 새 IMU 샘플 없으면: 제어/추정 스킵
+	if (!msg.timing.imu_new_sample) {
+		return;
+	}
     calculateServoOutput();
     setPWM();
     return;
@@ -371,21 +393,11 @@ uint8_t configurePWM(uint16_t hz)
 /* TIM14: PSC=83 (84MHz 기준 1MHz = 1us tick), ARR=65535 free-run */
 volatile uint16_t heartservo = 0;
 
-/* ms 기반 s_last_ms 대신 us 기반으로 */
-static uint16_t s_last_cnt_us = 0;
 
 void calculateServoOutput(void)
 {
-    /* dt 계산에서 ms단위 쓰면안됨. 거의 calculateServoOutput()가 1초에 600~800번 이상 실행되기 때문에 dt가 1~2로만 발생.
-       무조건 dt는 us단위로 하고 us는  TIM14 CNT 사용*/
-    uint16_t now_cnt_us  = (uint16_t)LL_TIM_GetCounter(TIM14);
-    uint16_t diff_us     = (uint16_t)(now_cnt_us - s_last_cnt_us);
-    s_last_cnt_us = now_cnt_us;
-
-    float dt_s = (float)diff_us * 0.000001f;
-    if (dt_s < 0.0005f) dt_s = 0.0005f;   /* 0.5ms 이하 방지 */
-    if (dt_s > 0.02f)   dt_s = 0.02f;     /* 20ms 이상 방지 */
-
+	float dt_s = msg.timing.dt_imu_s; // IMU 갱신값 기준 dt
+	if (dt_s <= 0.0f || dt_s > 0.05f) dt_s = 0.001f;
     /* D LPF alpha 업데이트 */
     float alpha = lpf_alpha(D_CUTOFF_HZ, dt_s);
     pid_roll.d_alpha  = alpha;
@@ -480,6 +492,11 @@ void calculateServoOutput(void)
         //imu에서 온 현재 자세
         float roll_meas_rad  = msg.attitude.roll;
         float pitch_meas_rad = msg.attitude.pitch;
+
+        if (s_trim_valid) {
+            roll_meas_rad  -= s_roll_trim;
+            pitch_meas_rad -= s_pitch_trim;
+        }
     #endif
 // 조종기로 들어온 목표자세
     float sp_roll_angle  = (rol_cmd / 500.0f) * MAX_ANGLE_RAD;
@@ -501,9 +518,9 @@ void calculateServoOutput(void)
 
 // 여기서부터 각속도 pid
     /* 측정 rate */
-    float meas_roll  = (float)msg.scaled_imu.xgyro * 0.001f; // x자이로가 mrad라 0.001로 스케일링 해줘야됨.
-    float meas_pitch = (float)msg.scaled_imu.ygyro * 0.001f;
-    float meas_yaw   = (float)msg.scaled_imu.zgyro * 0.001f;
+    float meas_roll  = msg.IMU_filt.gyro_x;  // rad/s (float)
+    float meas_pitch = msg.IMU_filt.gyro_y;  // rad/s
+    float meas_yaw   = msg.IMU_filt.gyro_z;  // rad/s
 
     /* Rate PID -> axis correction (us) */
     float u_roll  = pid_update_rate(&pid_roll,  sp_roll,  meas_roll,  dt_s);
