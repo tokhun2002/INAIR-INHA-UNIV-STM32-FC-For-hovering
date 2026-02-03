@@ -15,7 +15,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include <FC_AHRS/AHRS_module.h>
 
-
 /* Variables -----------------------------------------------------------------*/
 Kalman1D_t kal_vx, kal_vy;
 IMU_Velocity_t kalman_velocity = {0.0f, 0.0f, 0.0f};
@@ -28,10 +27,6 @@ float imu_roll = 0.0f;
 float imu_pitch = 0.0f;
 float pitch_offset = 0.0f;
 float roll_offset = 0.0f;
-
-static float yaw_imu = 0.0f;
-static uint8_t yaw_imu_inited = 0;
-
 
 const float DEG_TO_RAD = 0.0174533f;
 
@@ -86,33 +81,29 @@ static float ahrs_roll = 0.0f;
 static float ahrs_pitch = 0.0f;
 static float ahrs_yaw = 0.0f;
 
+volatile float g_vz_mps = 0.0f;     // 수직속도 (m/s)  +면 상승
+volatile float g_az_mps2 = 0.0f;    // 선형 수직가속도 (m/s^2) 디버그용
+
+
 int AHRS_GetData(void)
 {
+
     // 1. 센서 데이터 갱신
     IMU_GetData();
     Baro_GetData();
     // MAG_GetData(); // Yaw 적분만 할거면 당장 필요 없음
+    // IMU 샘플 기반 dt 사용 단위: s
+    if (!msg.timing.imu_new_sample) {
+    		return 0;
+	}
+    float dt = msg.timing.dt_imu_s;
+    //안전장치
+    if (dt > 0.05f || dt <= 0.0f) dt = 0.001f;
 
-    //DT 계산 - TIM14 (us 단위) -> 이건 잘 되던 거니 유지
-    static uint16_t prev_cnt = 0;
-    static uint8_t first_run = 1;
+
     float deadzone = 0.0003f;
     float deadzoneyaw = 0.0003f;
 
-    uint16_t now_cnt = (uint16_t)LL_TIM_GetCounter(TIM14);
-
-    if (first_run) {
-        prev_cnt = now_cnt;
-        first_run = 0;
-        return 0;
-    }
-
-    uint16_t diff_cnt = (uint16_t)(now_cnt - prev_cnt);
-    prev_cnt = now_cnt;
-    float dt = (float)diff_cnt * 0.000001f;
-
-    // 안전장치
-    if (dt > 0.05f || dt <= 0.0f) dt = 0.001f;
 
     // -----------------------------------------------------------
     // [데이터 준비]
@@ -120,26 +111,41 @@ int AHRS_GetData(void)
     SCALED_IMU* imu = &msg.scaled_imu;
     Vector3D acc;
     Vector3D gyro;
-
-    // 가속도 (m/s^2)
+    // mg 가 현상태.
+    // 가속도 (m/s^2)로 변환
     acc.x = imu->xacc * 0.001f * 9.81f;
     acc.y = imu->yacc * 0.001f * 9.81f;
     acc.z = imu->zacc * 0.001f * 9.81f;
 
     // 자이로 센서값 → 물리량 변환(m rad/s -> rad/s)
-	// 여기에 보정값 적용.
     gyro.x = (imu->xgyro * 0.001f) - gyro_off_x;
-	gyro.y = (imu->ygyro * 0.001f) - gyro_off_y;
-	gyro.z = (imu->zgyro * 0.001f) - gyro_off_z;
+    gyro.y = (imu->ygyro * 0.001f) - gyro_off_y;
+    gyro.z = (imu->zgyro * 0.001f) - gyro_off_z;
 
-
-	if (fabs(gyro.z) < deadzoneyaw) gyro.z = 0.0f;
-	if (fabs(gyro.x) < deadzone) gyro.x = 0.0f;
-	if (fabs(gyro.y) < deadzone) gyro.y = 0.0f;
+    if (fabs(gyro.z) < deadzoneyaw) gyro.z = 0.0f;
+    if (fabs(gyro.x) < deadzone)    gyro.x = 0.0f;
+    if (fabs(gyro.y) < deadzone)    gyro.y = 0.0f;
 
     // LPF 적용
-    acc = LPF_update3D(&lpf_acc, &acc);
+    acc  = LPF_update3D(&lpf_acc, &acc);
     gyro = LPF_update3D(&lpf_gyro, &gyro);
+
+    // 필터링 된 값 저장
+    // 다시
+    msg.scaled_imu2.xgyro = (int16_t)lrintf(gyro.x * 1000.0f);
+    msg.scaled_imu2.ygyro = (int16_t)lrintf(gyro.y * 1000.0f);
+    msg.scaled_imu2.zgyro = (int16_t)lrintf(gyro.z * 1000.0f);
+    msg.scaled_imu2.xacc  = (int16_t)lrintf(acc.x * (1000.0f / 9.81f));
+    msg.scaled_imu2.yacc  = (int16_t)lrintf(acc.y * (1000.0f / 9.81f));
+    msg.scaled_imu2.zacc  = (int16_t)lrintf(acc.z * (1000.0f / 9.81f));
+
+    //이건 서보나 다른곳에서 계산용 rad/s
+    msg.IMU_filt.gyro_x = gyro.x;
+    msg.IMU_filt.gyro_y = gyro.y;
+    msg.IMU_filt.gyro_z = gyro.z;
+    msg.IMU_filt.acc_x  = acc.x;
+    msg.IMU_filt.acc_y  = acc.y;
+    msg.IMU_filt.acc_z  = acc.z;
 
     // -----------------------------------------------------------
     // [1단계] 가속도 기반 각도 계산 (절대 기준)
@@ -165,9 +171,8 @@ int AHRS_GetData(void)
     ahrs_yaw += gyro.z * dt;
 
     // Yaw 범위 제한 (-PI ~ PI) - 선택사항
-    if(ahrs_yaw > 3.141592f) ahrs_yaw -= 6.283185f;
-    if(ahrs_yaw < -3.141592f) ahrs_yaw += 6.283185f;
-
+    if (ahrs_yaw > 3.141592f)  ahrs_yaw -= 6.283185f;
+    if (ahrs_yaw < -3.141592f) ahrs_yaw += 6.283185f;
 
     // -----------------------------------------------------------
     // [결과 저장]
@@ -176,9 +181,6 @@ int AHRS_GetData(void)
     msg.attitude.roll  = ahrs_roll;
     msg.attitude.pitch = ahrs_pitch;
     msg.attitude.yaw   = ahrs_yaw;
-
-    // 쿼터니언 값은 굳이 필요 없으면 0이나 변환값 채워넣음 (PID는 오일러 쓰니까 무관)
-    // 필요하다면 AHRS_Euler2Quaternion(msg.attitude) 해서 넣으면 됨
 
     return 0;
 }
@@ -225,51 +227,78 @@ int AHRS_CalibrateOffset(void)
     return 0;
 }
 
+volatile float testVz = 0.0f;
 
 void AHRS_computeVelocity(float dt)
 {
-	float ax = (float)msg.scaled_imu.xacc / 1000.0f * 9.81f;
-	float ay = (float)msg.scaled_imu.yacc / 1000.0f * 9.81f;
-	float az = (float)msg.scaled_imu.zacc / 1000.0f * 9.81f;
+    // dt 안전장치 (dt는 "초" 단위)
+    if (dt <= 0.0f || dt > 0.05f) dt = 0.001f;
 
-	float roll_rad = imu_roll * M_PI / 180.0f;
-	float pitch_rad = imu_pitch * M_PI / 180.0f;
+    // 1) 필터된 가속도 (m/s^2)
+    float ax = msg.IMU_filt.acc_x;
+    float ay = msg.IMU_filt.acc_y;
+    float az = msg.IMU_filt.acc_z;
 
-	// Body → World 회전행렬
-	float R11 = cosf(pitch_rad);
-	float R12 = sinf(roll_rad) * sinf(pitch_rad);
-	float R13 = cosf(roll_rad) * sinf(pitch_rad);
+    // 2) 자세각 (rad)
+    float roll  = msg.attitude.roll;
+    float pitch = msg.attitude.pitch;
 
-	float R21 = 0;
-	float R22 = cosf(roll_rad);
-	float R23 = -sinf(roll_rad);
+    const float GRAVITY = 9.81f;
 
-	float R31 = -sinf(pitch_rad);
-	float R32 = sinf(roll_rad) * cosf(pitch_rad);
-	float R33 = cosf(roll_rad) * cosf(pitch_rad);
+    // 3) 중력의 Body-frame 성분 (Yaw 무시 가정)
+    float gx_b = -GRAVITY * sinf(pitch);
+    float gy_b =  GRAVITY * sinf(roll) * cosf(pitch);
+    float gz_b =  GRAVITY * cosf(roll) * cosf(pitch);
 
-	// 중력 벡터 (World frame)
-	float gx_w = 0.0f;
-	float gy_w = 0.0f;
-	float gz_w = 9.81f;
+    // 4) 선형가속도
+    float ax_lin = ax - gx_b;
+    float ay_lin = ay - gy_b;
+    float az_lin = az - gz_b;
 
-	// 중력을 Body frame으로 변환: g_b = R^T * g_w
-	float gx_b = R11 * gx_w + R21 * gy_w + R31 * gz_w;
-	float gy_b = R12 * gx_w + R22 * gy_w + R32 * gz_w;
-	float gz_b = R13 * gx_w + R23 * gy_w + R33 * gz_w;
+    // ---- 여기부터 "Vz 안정화" 핵심 ----
+    // (A) dt 누적 + 가속도 누적 후 200Hz로만 적분
+    static float dt_accum = 0.0f;
+    static float ax_accum = 0.0f, ay_accum = 0.0f, az_accum = 0.0f;
+    static int   n_accum  = 0;
 
-	// 센서의 순수 가속도
-	float ax_corrected = ax - gx_b;
-	float ay_corrected = ay - gy_b;
-	float az_corrected = az - gz_b;
+    dt_accum += dt;
+    ax_accum += ax_lin;
+    ay_accum += ay_lin;
+    az_accum += az_lin;
+    n_accum++;
 
-	// 속도 적분
-	imu_velocity.vx += ax_corrected * dt;
-	imu_velocity.vy += ay_corrected * dt;
-	imu_velocity.vz += az_corrected * dt;
+    // 목표 업데이트 주기: 200Hz (5ms)
+    const float DT_TARGET = 0.005f;
+    if (dt_accum < DT_TARGET) return;
+
+    // 평균 선형가속도
+    float invN = 1.0f / (float)n_accum;
+    float ax_mean = ax_accum * invN;
+    float ay_mean = ay_accum * invN;
+    float az_mean = az_accum * invN;
+
+    // 누적 버퍼 리셋
+    float dT = dt_accum;
+    dt_accum = 0.0f;
+    ax_accum = ay_accum = az_accum = 0.0f;
+    n_accum = 0;
+
+    // (B) 작은 진동 적분 억제(너무 크면 반응 죽음) - 필요시 튜닝
+    const float acc_deadband = 0.05f;   // 0.05~0.20 사이에서 튜닝
+    if (fabsf(az_mean) < acc_deadband) az_mean = 0.0f;
+
+    // (C) leak를 dt에 맞게 자동 계산 (루프 주파수 무관)
+    // tau_v: 속도가 0으로 돌아가는 시간상수(초). 0.5~2.0초 추천
+    const float tau_v = 1.0f;
+    float leak = expf(-dT / tau_v);
+
+    imu_velocity.vx = leak * imu_velocity.vx + ax_mean * dT;
+    imu_velocity.vy = leak * imu_velocity.vy + ay_mean * dT;
+    imu_velocity.vz = leak * imu_velocity.vz + az_mean * dT;
+
+    // 디버그용: km/h (m/s * 3.6)
+    testVz = imu_velocity.vz * 3.6f;
 }
-
-
 /*
  * @brief : Hard/Soft-Iron 보정 + 기울기 보상 + yaw 계산
  * @detail : 가속도를 기반으로 roll, pitch 추정
