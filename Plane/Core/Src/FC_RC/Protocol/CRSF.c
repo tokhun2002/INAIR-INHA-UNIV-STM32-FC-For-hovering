@@ -1,165 +1,130 @@
 /*
  * FC_RC/Protocol/CRSF/CRSF.c
- *
- *  Created on: Nov 12, 2025
- *      Author: tokhu
+ * LL Driver Version (Half-Duplex on PA9)
  */
 
-/* Includes ------------------------------------------------------------------*/
-#include <FC_RC/Protocol/CRSF/CRSF.h>
-#include <FC_RC/Protocol/CRSF/CRSF_type.h>
-#include <FC_RC/Protocol/CRSF/CRSF_module.h>
+#include "FC_RC/Protocol/CRSF/CRSF.h"
+#include "FC_RC/RC_module.h"
+#include "main.h"
+#include <string.h>
 
-/* Variables -----------------------------------------------------------------*/
-static uint8_t s_rssi = 0;  /* 프레임 기반 추정 */
+/* --- [변수 선언] --- */
+static uint8_t crsf_rx_dma_buffer[CRSF_MAX_BUFFER_SIZE];
+static uint16_t crsf_channels[16];
 
-/* ===== 내부 유틸 ============================================= */
-
-/* CRC-8(D5), init 0x00 */
-static uint8_t CRSF_calcCRC8(const uint8_t *data, uint32_t len)
-{
-    uint8_t crc = 0x00;
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t in = data[i];
-        for (int b = 0; b < 8; b++) {
-            uint8_t mix = (crc ^ in) & 0x80;
-            crc <<= 1;
-            if (mix) crc ^= 0xD5u;
-            in <<= 1;
-        }
-    }
-    return crc;
+/* --- [내부 함수] --- */
+static void CRSF_Parse_Channels(uint8_t *payload) {
+    crsf_channels[0]  = ((payload[0]       ) | (payload[1] << 8)) & 0x07FF;
+    crsf_channels[1]  = ((payload[1] >> 3  ) | (payload[2] << 5)) & 0x07FF;
+    crsf_channels[2]  = ((payload[2] >> 6  ) | (payload[3] << 2) | (payload[4] << 10)) & 0x07FF;
+    crsf_channels[3]  = ((payload[4] >> 1  ) | (payload[5] << 7)) & 0x07FF;
+    crsf_channels[4]  = ((payload[5] >> 4  ) | (payload[6] << 4)) & 0x07FF;
+    crsf_channels[5]  = ((payload[6] >> 7  ) | (payload[7] << 1) | (payload[8] << 9)) & 0x07FF;
+    crsf_channels[6]  = ((payload[8] >> 2  ) | (payload[9] << 6)) & 0x07FF;
+    crsf_channels[7]  = ((payload[9] >> 5  ) | (payload[10] << 3)) & 0x07FF;
 }
 
-/* 16채널 × 11bit 언팩 → raw[0..2047] */
-static void CRSF_unpackChannels11bit(const uint8_t *payload22, uint16_t *raw16)
-{
-    uint32_t bitpos = 0;
-    for (int ch = 0; ch < (int)CRSF_RC_CHANS; ch++) {
-        const uint32_t byte_ix = bitpos >> 3;
-        const uint32_t bit_off = bitpos & 7;
-        uint32_t v =  (uint32_t)payload22[byte_ix]
-                    | ((uint32_t)payload22[byte_ix + 1] << 8)
-                    | ((uint32_t)payload22[byte_ix + 2] << 16);
-        v >>= bit_off;
-        raw16[ch] = (uint16_t)(v & 0x7FFu);
-        bitpos += 11;
-    }
+static uint16_t map_crsf_to_pwm(uint16_t x) {
+    if (x < 172) x = 172;
+    if (x > 1811) x = 1811;
+    return (uint16_t)((x - 172) * (2000 - 1000) / (1811 - 172) + 1000);
 }
 
-/* raw(172..1811) → 1000..2000us */
-static inline uint16_t CRSF_rawToUs(uint16_t raw)
-{
-    const float in_min = 172.f, in_max = 1811.f;
-    float usf = 1000.f + ((float)raw - in_min) * 1000.f / (in_max - in_min);
-    if (usf < 1000.f) usf = 1000.f;
-    if (usf > 2000.f) usf = 2000.f;
-    return (uint16_t)(usf + 0.5f);
-}
+/* -------------------------------------------------------------------------- */
 
-/* ===== 공개 함수(헤더 4개 그대로) ========================================= */
-
+/**
+  * @brief  CRSF 연결 (Half-Duplex PA9)
+  */
 int CRSF_connect(void)
 {
-    s_rssi = 0;
-    LL_USART_Disable(USART1);  // 일시 비활성화
-        LL_USART_SetBaudRate(USART1,
-                             SystemCoreClock,
-                             LL_USART_OVERSAMPLING_16,
-                             420000);  // ELRS 기본 속도 420 000 bps
-        LL_USART_Enable(USART1);   // 다시 활성화
-        /* ======================================== */
+    // [1] GPIO 설정 (PA9 = USART1_TX/RX Half-Duplex)
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
 
+    // PA9 설정 (기존 SRXL2와 동일한 핀 사용)
+    LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_9, LL_GPIO_MODE_ALTERNATE);
+    LL_GPIO_SetPinSpeed(GPIOA, LL_GPIO_PIN_9, LL_GPIO_SPEED_FREQ_VERY_HIGH);
+    LL_GPIO_SetPinOutputType(GPIOA, LL_GPIO_PIN_9, LL_GPIO_OUTPUT_PUSHPULL); // 혹은 OPEN_DRAIN (상황에 따라 다름, 보통 PushPull도 됨)
+    LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_9, LL_GPIO_PULL_UP);
+    LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_9, LL_GPIO_AF_7); // AF7 = USART1
+
+    // [2] USART1 설정 (반이중 모드 & 420000bps)
+    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+
+    LL_USART_Disable(USART1);
+    LL_USART_ConfigHalfDuplexMode(USART1); // [핵심] 반이중 모드 설정
+
+    // 보드레이트 420,000 설정
+    // PCLK2 주파수(SystemCoreClock/2 or 1)를 가져와서 계산
+    // STM32F407 기준 APB2는 보통 84MHz
+    LL_USART_SetBaudRate(USART1, SystemCoreClock/2, LL_USART_OVERSAMPLING_16, 420000);
+
+    LL_USART_SetDataWidth(USART1, LL_USART_DATAWIDTH_8B);
+    LL_USART_SetStopBitsLength(USART1, LL_USART_STOPBITS_1);
+    LL_USART_SetParity(USART1, LL_USART_PARITY_NONE);
+    LL_USART_SetTransferDirection(USART1, LL_USART_DIRECTION_TX_RX);
+
+    LL_USART_Enable(USART1);
+
+    // [3] DMA 설정 (USART1_RX는 DMA2 Stream2 Channel4)
+    // 반이중 모드여도 수신 데이터는 RX 레지스터로 들어오므로 DMA 설정은 RX와 동일합니다.
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA2);
+
+    LL_DMA_DisableStream(DMA2, LL_DMA_STREAM_2);
+
+    LL_DMA_SetChannelSelection(DMA2, LL_DMA_STREAM_2, LL_DMA_CHANNEL_4);
+    LL_DMA_SetDataTransferDirection(DMA2, LL_DMA_STREAM_2, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+    LL_DMA_SetStreamPriorityLevel(DMA2, LL_DMA_STREAM_2, LL_DMA_PRIORITY_HIGH);
+    LL_DMA_SetMode(DMA2, LL_DMA_STREAM_2, LL_DMA_MODE_CIRCULAR);
+    LL_DMA_SetPeriphIncMode(DMA2, LL_DMA_STREAM_2, LL_DMA_PERIPH_NOINCREMENT);
+    LL_DMA_SetMemoryIncMode(DMA2, LL_DMA_STREAM_2, LL_DMA_MEMORY_INCREMENT);
+    LL_DMA_SetPeriphSize(DMA2, LL_DMA_STREAM_2, LL_DMA_PDATAALIGN_BYTE);
+    LL_DMA_SetMemorySize(DMA2, LL_DMA_STREAM_2, LL_DMA_MDATAALIGN_BYTE);
+
+    LL_DMA_SetPeriphAddress(DMA2, LL_DMA_STREAM_2, LL_USART_DMA_GetRegAddr(USART1));
+    LL_DMA_SetMemoryAddress(DMA2, LL_DMA_STREAM_2, (uint32_t)crsf_rx_dma_buffer);
+    LL_DMA_SetDataLength(DMA2, LL_DMA_STREAM_2, CRSF_MAX_BUFFER_SIZE);
+
+    // [4] DMA 및 RX 인터럽트 활성화
+    LL_DMA_EnableStream(DMA2, LL_DMA_STREAM_2);
+    LL_USART_EnableDMAReq_RX(USART1);
 
     return 0;
 }
 
+/**
+  * @brief  데이터 파싱
+  */
 int CRSF_getControlData(void)
 {
-    if (IS_FL_RX == 0) return -1;
-    CLEAR_FL_RX();
+    const uint8_t CRSF_SYNC_BYTE = 0xC8;
+    const uint8_t CRSF_RC_TYPE   = 0x16;
 
-    /* RC_Buffer: [0]=addr, [1]=len(type..payload..crc), [2]=type, [3..]=payload, [end]=crc */
-    const uint8_t addr = RC_Buffer[0];
-    const uint8_t len  = RC_Buffer[1];
-
-    if (addr != CRSF_ADDR_RX) return -2;
-    if (len < 3 || len > (CRSF_MAX_BUFFER_SIZE - 2)) return -2;
-
-    /* CRC 검증: 대상=type..payload(len-1), 마지막=crc */
+    for (int i = 0; i < CRSF_MAX_BUFFER_SIZE - 26; i++)
     {
-        const uint8_t crc_calc = CRSF_calcCRC8(&RC_Buffer[2], (uint32_t)(len - 1U));
-        const uint8_t crc_rx   = RC_Buffer[1 + 1 + len - 1]; /* = RC_Buffer[2 + len - 1] */
-        if (crc_calc != crc_rx) return -2;
-    }
+        if (crsf_rx_dma_buffer[i] == CRSF_SYNC_BYTE)
+        {
+            if (crsf_rx_dma_buffer[i+2] == CRSF_RC_TYPE)
+            {
+                CRSF_Parse_Channels(&crsf_rx_dma_buffer[i+3]);
 
-    /* RC 프레임만 처리 */
-    if (RC_Buffer[2] != CRSF_FRAME_TYPE_RC) return -2;
+                // 채널 매핑
+                msg.RC_channels.value[param.rc.map.ROL] = map_crsf_to_pwm(crsf_channels[0]);
+                msg.RC_channels.value[param.rc.map.PIT] = map_crsf_to_pwm(crsf_channels[1]);
+                msg.RC_channels.value[param.rc.map.THR] = map_crsf_to_pwm(crsf_channels[2]);
+                msg.RC_channels.value[param.rc.map.YAW] = map_crsf_to_pwm(crsf_channels[3]);
 
-    /* 채널 언팩 → us 매핑 → 메시지 반영 */
-    {
-        const uint8_t *payload = &RC_Buffer[3]; /* 22바이트 */
-        uint16_t raw[CRSF_RC_CHANS];
-        CRSF_unpackChannels11bit(payload, raw);
+                // AUX 채널 (스위치)
+                msg.RC_channels.value[4] = map_crsf_to_pwm(crsf_channels[4]);
+                msg.RC_channels.value[5] = map_crsf_to_pwm(crsf_channels[5]);
+                msg.RC_channels.value[6] = map_crsf_to_pwm(crsf_channels[6]);
+                msg.RC_channels.value[7] = map_crsf_to_pwm(crsf_channels[7]);
 
-        for (int i = 0; i < (int)CRSF_RC_CHANS; i++) {
-            uint16_t us = CRSF_rawToUs(raw[i]);
-            RC_MSG_setChannelValue(us, (uint8_t)i);
+                return 0;
+            }
         }
     }
-
-    s_rssi = 254U; /* 프레임 수신 기반 추정값 */
-    RC_MSG_setChannelInfo((uint8_t)CRSF_RC_CHANS, s_rssi);
-
-    return 0;
+    return -1;
 }
 
-uint8_t CRSF_getRssi(void)
-{
-    return s_rssi;
-}
-
-int CRSF_readByteIRQ2(const uint8_t data)
-{
-    static uint8_t cnt    = 0;
-    static uint8_t maxLen = 0; /* 총 길이 = 2 + len */
-
-    if (RC_isBufferInit() != 0) return -2;
-    if (cnt >= CRSF_MAX_BUFFER_SIZE) { cnt = 0; return -2; }
-
-    switch (cnt)
-    {
-    case 0: /* address */
-        if (data == CRSF_ADDR_RX) {
-            RC_Buffer[cnt] = data;
-            cnt++;
-        } else {
-            cnt = 0;
-            return -1;
-        }
-        break;
-
-    case 1: /* len (type..payload..crc 바이트 수) */
-        if (data == 0 || data > (CRSF_MAX_BUFFER_SIZE - 2)) {
-            cnt = 0;
-            return -1;
-        } else {
-            RC_Buffer[cnt] = data;
-            cnt++;
-            maxLen = (uint8_t)(2U + data); /* addr + len + len */
-        }
-        break;
-
-    default:
-        RC_Buffer[cnt] = data;
-        if (cnt == (uint8_t)(maxLen - 1U)) {
-            cnt = 0;
-            return 0;      /* 프레임 끝 → 상위( RadioControl.c )가 SET_FL_RX() */
-        } else {
-            cnt++;
-        }
-        break;
-    }
-
-    return 1;
-}
+uint8_t CRSF_getRssi(void) { return 0; }
+int CRSF_readByteIRQ2(const uint8_t data) { (void)data; return 0; }
