@@ -6,6 +6,94 @@ https://github.com/NARAE-INHA-UNIV/STM32-FC
 이를 기반으로 학습과 개선을 이어갈 수 있었습니다.
 
 기존 코드 작성자분들께 감사의 뜻을 전합니다.
+---
+# Update: 2026.03.03 – Yaw Rate 안정화 및 축 간 간섭 제거
+---
+
+## 1. 문제 배경
+
+기존 제어 구조에서 Yaw PID를 강하게 설정할 경우:
+
+- Yaw는 비교적 잘 유지되나  
+- Roll / Pitch 축이 심하게 흔들리며 제어 불능 상태로 진입  
+- 반대로 Yaw PID를 줄이면 Roll / Pitch는 안정되지만 Yaw가 지속적으로 회전  
+
+이는 **Yaw 제어가 Roll/Pitch 출력 권한을 침식하는 구조적 문제**로 판단되었다.
+
+특히 Yaw는 모터의 **차등 토크(differential torque)** 로 생성되므로,
+Roll/Pitch 보정이나 낮은 스로틀 상황에서 쉽게 출력 포화(saturation)에 걸리며,
+이 상태에서 Yaw I-term이 누적되어 축 간 “싸움”이 발생했다.
+
+---
+
+## 2. 핵심 수정 개요
+
+본 업데이트에서는 Yaw 축을 다음과 같이 **구조적으로 분리**하였다.
+
+- Yaw PID의 **출력 한계(out_limit)** 를 Roll/Pitch와 분리
+- Yaw I-term의 **적분 한계(i_limit)** 를 Roll/Pitch보다 훨씬 작게 제한
+- 포화(saturation) 발생 시 Yaw I-term을 자동 감쇠
+- 장기적인 Yaw 토크 불균형은 **Yaw Bias 적분기로 별도 처리**
+
+이를 통해:
+- Roll / Pitch 제어 권한을 최우선으로 보호
+- Yaw는 “필요한 만큼만” 개입하도록 제한
+- Yaw PID와 Roll/Pitch PID 간 상호 간섭 제거
+
+---
+
+## 3. Yaw Bias 보정 로직 추가
+
+Yaw PID만으로는 하드웨어 토크 불균형(모터·ESC·프레임 오차)을 완전히 제거하기 어렵다.  
+이를 해결하기 위해 **Yaw Bias 보정기**를 추가하였다.
+
+### 동작 조건
+Yaw Bias는 다음 조건을 모두 만족할 때만 학습된다.
+
+- 기체가 공중 상태 (`s_is_airborne == 1`)
+- 스로틀이 일정 이상
+- Yaw 스틱 입력이 거의 없음 (deadband)
+- Yaw 각속도가 과도하지 않음
+```c
+#if YAW_BIAS_ENABLE
+    uint8_t bias_ok =
+        (s_is_airborne == 1) &&
+        (thr_us >= YAW_BIAS_MIN_THR_US) &&
+        (fabsf(yaw_cmd) < (float)STICK_DEADBAND_US) &&
+        (fabsf(meas_yaw) < YAW_BIAS_MAX_ABS_RATE_RAD_S);
+
+    if (bias_ok) {
+        /* meas_yaw -> 0으로 보내는 평균 토크를 천천히 학습 */
+        s_yaw_bias_us += (-YAW_BIAS_KI_US_PER_RAD) * meas_yaw * dt_s;
+        s_yaw_bias_us = clampf(s_yaw_bias_us, -YAW_BIAS_LIMIT_US, YAW_BIAS_LIMIT_US);
+    }
+
+    u_yaw += s_yaw_bias_us;
+    u_yaw = clampf(u_yaw, -YAW_OUT_LIMIT_US, YAW_OUT_LIMIT_US);
+```
+### 동작 방식
+- 실제 Yaw 각속도(`meas_yaw`)를 0으로 만들기 위한 **평균 토크**를
+  매우 느린 적분기로 학습
+- 이는 조종 입력이나 빠른 제어에는 개입하지 않고,
+  **“가만히 있어도 도는 현상”만 제거**하는 용도임
+
+---
+
+## 4. Saturation 대응 (축 간 싸움 방지)
+
+모터 출력이 1000–2000us 범위를 벗어나려는 경우:
+
+- Roll / Pitch 출력은 유지
+- Yaw I-term 및 Yaw Bias는 자동 감쇠(decay)
+
+이를 통해:
+- 출력 포화 상황에서도 Roll / Pitch 안정성 유지
+- Yaw 적분 폭주 방지
+- 스로틀 상승 시 “갑자기 Yaw가 튀는 현상” 제거
+
+---
+
+
 
 ---
 # IMU–AHRS–SERVO dt 동기화   
