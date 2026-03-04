@@ -186,7 +186,7 @@ void DTIMU_Check(void)
     	dbg_noterr_imu_cnt++;
     }
 
-    // avg (누적 평균)
+    // avg (누적 평균) average
     dbg_dt_imu_cnt++;
     dbg_dt_imu_avg_us += (dt_us - dbg_dt_imu_avg_us) / (dbg_dt_imu_cnt + 100);
 }

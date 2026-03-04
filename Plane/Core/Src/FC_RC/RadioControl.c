@@ -115,6 +115,7 @@ int RC_init(void) {
         /* 5초 지나면 강제 캘리브레이션 진입 */
         BuzzerDisableThrottleHigh();
         if(RC_enterESCcalibration()==0) break;
+
     }
 
     LL_GPIO_ResetOutputPin(LED_RED_GPIO_Port, LED_RED_Pin);
