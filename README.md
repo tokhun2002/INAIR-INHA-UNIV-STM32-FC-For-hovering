@@ -17,7 +17,7 @@ USART1을 420000bps half-duplex 모드로 설정하고, RX 데이터는 DMA circ
 메인 루프에서는 DMA 버퍼를 순회하면서 **CRSF 프레임 구조(ADDR-LEN-TYPE-PAYLOAD-CRC)** 에 따라 데이터를 해석한다.
 0xC8(Receiver address)와 0x16(RC channel frame type)을 기준으로 RC 채널 프레임을 탐색하고, payload 영역에서 11-bit packed 채널 데이터를 추출하여 각 RC 채널 값을 복원한다.
 
-추출된 채널 값은 CRSF 범위(172~1811)를 기준으로 ** PWM 범위(1000~2000 µs) **로 변환한 뒤 msg.RC_channels 구조체에 매핑하여 비행 제어 로직에서 사용할 수 있도록 전달하였다.
+추출된 채널 값은 CRSF 범위(172 에서 1811)를 기준으로 **PWM 범위(1000~2000 µs)** 로 변환한 뒤 msg.RC_channels 구조체에 매핑하여 비행 제어 로직에서 사용할 수 있도록 전달하였다.
 
 ---
 # Update: 2026.03.03 – Yaw Rate 안정화 및 축 간 간섭 제거
