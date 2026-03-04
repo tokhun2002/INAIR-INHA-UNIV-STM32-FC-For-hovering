@@ -32,7 +32,7 @@ int PARM_load(void){
 	param.servo.AUTO_TRIM = 0;
 	param.servo.DSHOT_ESC = 0;
 	param.servo.DSHOT_RATE = 0;
-	param.servo.RATE = 400;
+	param.servo.RATE = 100;
 	param.servo.GPIO_MASK = 0x0FFF;
 	param.servo.RC_FS_MSK = 0xFF;
 	param.servo._32_ENABLE = 0;
