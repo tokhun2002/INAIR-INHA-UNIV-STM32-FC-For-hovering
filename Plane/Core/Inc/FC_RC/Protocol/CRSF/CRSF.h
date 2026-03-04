@@ -11,7 +11,7 @@
 #include "main.h"
 
 /* Macro ---------------------------------------------------------------------*/
-#define CRSF_MAX_BUFFER_SIZE    (64)
+#define CRSF_MAX_BUFFER_SIZE    (128)
 
 /* Functions -----------------------------------------------------------------*/
 int     CRSF_connect(void);

@@ -27,7 +27,7 @@ int PARM_load(void){
 //	setRC_None();
 //	setRC_SRXL2();
 	setRC_PPM();
-//	setRC_CRSF();
+	setRC_CRSF();
 
 	param.servo.AUTO_TRIM = 0;
 	param.servo.DSHOT_ESC = 0;
@@ -101,6 +101,19 @@ void setRC_PPM(void)
 
 void setRC_CRSF(void)
 {
-    // ELRS(CRSF)
-    param.rc.PROTOCOLS    = (0x1 << RC_PROTOCOL_CRSF);   // 비트 9 (CRSF)
+	// ELRS(CRSF) 프로토콜 활성화
+	param.rc.PROTOCOLS = (0x1 << RC_PROTOCOL_CRSF);
+	for(int i=0; i<sizeof(param.rc.channel)/sizeof(param.rc.channel[0]); i++)
+	{
+		param.rc.channel[i].MIN = 1000;
+		param.rc.channel[i].MAX = 2000;
+		param.rc.channel[i].TRIM = 0;
+		param.rc.channel[i].DZ = 0;    // 데드존 (필요시 20~30 정도 설정)
+		param.rc.channel[i].OPTION = 0;
+	}
+
+	param.rc.map.ROL = 0; // Channel 1 (Aileron)
+	param.rc.map.PIT = 1; // Channel 2 (Elevator)
+	param.rc.map.THR = 2; // Channel 3 (Throttle)
+	param.rc.map.YAW = 3; // Channel 4 (Rudder)
 }
