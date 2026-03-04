@@ -8,7 +8,7 @@ https://github.com/NARAE-INHA-UNIV/STM32-FC
 기존 코드 작성자분들께 감사의 뜻을 전합니다.
  
 ---
-# Update: 2026.03.03 – elrs 프로토콜 추가 (developed by kimsh039) 
+# Update: 2026.03.04 – elrs 프로토콜 추가 (developed by kimsh039) 
 ---
 RC elrs 프로토콜 추가 
 ELRS(CRSF) 프로토콜은 USART1 기반 DMA 수신 구조로 구현하였다.
